@@ -1,0 +1,105 @@
+From: Oh My Pi Discord Bridge <discord@example.com>
+Date: Sun Feb 23 17:35:00 2025
+Subject: [PATCH] Track and emit correlation IDs in RPC mode
+
+Track the active command's correlation ID and include it in all
+streaming events. This enables clients to correlate events with
+the commands that triggered them.
+
+Changes:
+- Add activeCommandId variable to track current command
+- Set activeCommandId when handling prompt/steer/follow_up commands
+- Wrap event emitter to include correlation ID in events
+- Clear activeCommandId when agent completes
+
+This works in conjunction with the types patch that adds the
+optional `id` field to event types.
+---
+ src/modes/rpc/rpc-mode.ts | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/modes/rpc/rpc-mode.ts b/src/modes/rpc/rpc-mode.ts
+index abc1234..def5678 100644
+--- a/src/modes/rpc/rpc-mode.ts
++++ b/src/modes/rpc/rpc-mode.ts
+@@ -60,6 +60,9 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
+ 	const pendingExtensionRequests = new Map<string, PendingExtensionRequest>();
+ 
+ 	// Shutdown request flag (wrapped in object to allow mutation with const)
+ 	const shutdownState = { requested: false };
++
++	// Track the active command's correlation ID for event streaming
++	let activeCommandId: string | undefined = undefined;
+ 
+ 	/**
+ 	 * Extension UI context that uses the RPC protocol.
+@@ -415,8 +418,24 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
+ 		});
+ 	}
+ 
+-	// Output all agent events as JSON
+-	session.subscribe(event => {
+-		output(event);
++	// Output all agent events as JSON, with correlation ID if active
++	session.subscribe((baseEvent) => {
++		// Include correlation ID if a command is active
++		const event = activeCommandId
++			? { ...baseEvent, id: activeCommandId }
++			: baseEvent;
++		output(event);
+ 	});
+ 
+ 	// Handle a single command
+@@ -431,6 +450,9 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
+ 		switch (command.type) {
+ 			// =================================================================
+ 			// Prompting
+ 			// =================================================================
+ 
+ 			case "prompt": {
++				// Track correlation ID for streaming events
++				activeCommandId = command.id;
++
+ 				// Don't await - events will stream
+ 				// Extension commands are executed immediately, file prompt templates are expanded
+ 				// If streaming and streamingBehavior specified, queues via steer/followUp
+ 				session
+ 					.prompt(command.message, {
+ 						images: command.images,
+ 						streamingBehavior: command.streamingBehavior,
+ 					})
+-					.catch(e => output(error(id, "prompt", e.message)));
++					.catch(e => {
++						output(error(id, "prompt", e.message));
++						// Clear correlation ID on error
++						activeCommandId = undefined;
++					});
+ 				return success(id, "prompt");
+ 			}
+ 
+ 			case "steer": {
++				// Track correlation ID for streaming events
++				activeCommandId = command.id;
+ 				await session.steer(command.message, command.images);
++				// Clear correlation ID after synchronous command completes
++				activeCommandId = undefined;
+ 				return success(id, "steer");
+ 			}
+ 
+ 			case "follow_up": {
++				// Track correlation ID for streaming events
++				activeCommandId = command.id;
+ 				await session.followUp(command.message, command.images);
++				// Clear correlation ID after synchronous command completes
++				activeCommandId = undefined;
+ 				return success(id, "follow_up");
+ 			}
+ 
+ 			case "abort": {
++				// Clear correlation ID on abort
++				activeCommandId = undefined;
+ 				await session.abort();
+ 				return success(id, "abort");
+ 			}
+--
+2.39.3
