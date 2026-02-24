@@ -64,12 +64,15 @@ impl EventHandler for DiscordHandler {
         if msg.content.starts_with(prefix) {
             let command = msg.content[prefix.len()..].trim();
             
-            debug!("Received command: {}", command);
+            info!("Received command: {}", command);
             
             match command {
-                "ping" => {
+"ping" => {
+                    info!("Ping command received from {}", msg.author.name);
                     if let Err(e) = msg.channel_id.say(&ctx, "Pong!").await {
                         error!("Failed to send ping response: {}", e);
+                    } else {
+                        info!("Pong! sent successfully");
                     }
                 }
                 "help" => {
