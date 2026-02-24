@@ -8,9 +8,11 @@ use crate::discord::DiscordBot;
 use crate::rpc::RpcClient;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file
+    dotenv::dotenv().ok();
+    
     // Initialize tracing
     let filter = EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into())
