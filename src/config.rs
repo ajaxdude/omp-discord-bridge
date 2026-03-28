@@ -42,6 +42,7 @@ impl Config {
         })
     }
     
+    #[allow(dead_code)]
     /// Load configuration from a file
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -52,13 +53,13 @@ impl Config {
         
         // Override with environment variables if set
         let discord_token = env::var("DISCORD_TOKEN")
-            .unwrap_or_else(|_| config.discord_token);
+            .unwrap_or(config.discord_token);
         
         let discord_prefix = env::var("DISCORD_PREFIX")
-            .unwrap_or_else(|_| config.discord_prefix);
+            .unwrap_or(config.discord_prefix);
         
         let omp_path = env::var("OMP_PATH")
-            .unwrap_or_else(|_| config.omp_path);
+            .unwrap_or(config.omp_path);
         
         Ok(Self {
             discord_token,

@@ -16,5 +16,9 @@ async-trait = "0.1"
 thiserror = "2.0"
 dotenv = "0.15"
 
+# MCP SDK for Model Context Protocol server
+rust-mcp-sdk = { version = "0.9", features = ["stdio", "macros"] }
+rust-mcp-macros = "0.9"
+
 [dev-dependencies]
 tokio-test = "0.4"
