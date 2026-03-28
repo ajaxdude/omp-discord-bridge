@@ -15,6 +15,7 @@ An MCP (Model Context Protocol) server that exposes Discord capabilities as tool
 - Rust 1.70+ and Cargo
 - A Discord bot token ([create one here](https://discord.com/developers/applications))
 - OMP configured to connect to MCP servers via stdio
+
 ## Quick Start
 
 ### 1. Clone the Repository
