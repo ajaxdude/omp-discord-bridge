@@ -15,21 +15,30 @@ An MCP (Model Context Protocol) server that exposes Discord capabilities as tool
 - Rust 1.70+ and Cargo
 - A Discord bot token ([create one here](https://discord.com/developers/applications))
 - OMP configured to connect to MCP servers via stdio
+## Quick Start
 
-## Installation
+### 1. Clone the Repository
 
-1. **Build the project**:
-   ```bash
-   cd ~/ai/projects/omp-discord-bridge
-   cargo build --release
-   ```
+```bash
+git clone https://github.com/ajaxdude/omp-discord-bridge.git
+cd omp-discord-bridge
+```
 
-2. **Configure environment variables**:
-   ```bash
-   cp .env.example .env
-   # Edit .env and add your Discord bot token
-   ```
+### 2. Install Dependencies and Build
 
+```bash
+cargo build --release
+```
+
+### 3. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env and add your Discord bot token
+nano .env
+```
+
+## Prerequisites
 ## Configuration
 
 Create a `.env` file in the project directory with the following variables:
