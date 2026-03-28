@@ -38,7 +38,6 @@ cp .env.example .env
 nano .env
 ```
 
-## Prerequisites
 ## Configuration
 
 Create a `.env` file in the project directory with the following variables:
