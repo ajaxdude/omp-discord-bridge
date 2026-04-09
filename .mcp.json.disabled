@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "discord": {
+      "command": "./target/release/omp_discord_bridge",
+      "cwd": "/home/papa/ai/projects/omp-discord-bridge",
+      "transport": "stdio"
+    }
+  }
+}
+
