@@ -332,7 +332,7 @@ impl EventHandler for DiscordHandler {
         };
 
         match result {
-            Ok((response, new_session)) => {
+            Ok((response, new_session, model_info)) => {
                 // Persist the new (or same) session ID for the next message.
                 // When a model override was used we still save the returned
                 // session so subsequent model-less messages can continue the
@@ -344,8 +344,12 @@ impl EventHandler for DiscordHandler {
                     info!("Saved session {} for channel {}", sid, msg.channel_id);
                 }
 
+                // When a --model override was used, append a small footer so
+                // the user can confirm which model actually answered.
                 let text = if response.is_empty() {
                     "(OMP returned an empty response)".to_string()
+                } else if let (Some(_), Some((provider, mdl))) = (model_owned.as_deref(), model_info) {
+                    format!("{response}\n\n-# {provider}/{mdl}")
                 } else {
                     response
                 };
@@ -450,7 +454,7 @@ async fn invoke_omp(
     model: Option<&str>,
     query: &str,
     session_id: Option<&str>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<String>, Option<(String, String)>), String> {
     use std::process::Stdio;
     use tokio::process::Command;
 
@@ -499,21 +503,21 @@ async fn invoke_omp(
 
 /// Parse OMP's `--mode json` NDJSON output.
 ///
-/// Returns `(assistant_text, session_id)`.
+/// Returns `(assistant_text, session_id, Option<(provider, model)>)`.
 ///
 /// Events we care about:
 /// - `{"type":"session","id":"<id>"}` — the active session ID (first event)
-/// - `{"type":"message_end","message":{"role":"assistant","content":[...]}}` —
+/// - `{"type":"message_end","message":{"role":"assistant",...}}` —
 ///   a completed assistant turn; we collect `{"type":"text","text":"..."}` items
-///   and ignore `toolCall` items.
+///   and ignore `toolCall` items.  We also capture the first `provider`/`model`
+///   pair so the caller can display which model actually answered.
 ///
-/// All other event types (tool_execution_*, turn_*, message_update, thinking, …)
-/// are skipped.  Multiple assistant text blocks across a multi-turn session are
-/// joined with a blank line.
-fn parse_omp_json_output(ndjson: &[u8]) -> (String, Option<String>) {
+/// All other event types are skipped.
+fn parse_omp_json_output(ndjson: &[u8]) -> (String, Option<String>, Option<(String, String)>) {
     let content = String::from_utf8_lossy(ndjson);
     let mut text_pieces: Vec<String> = Vec::new();
     let mut session_id: Option<String> = None;
+    let mut model_info: Option<(String, String)> = None;
 
     for line in content.lines() {
         let line = line.trim();
@@ -540,6 +544,15 @@ fn parse_omp_json_output(ndjson: &[u8]) -> (String, Option<String>) {
                 if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
                     continue;
                 }
+                // Capture provider+model from the first assistant message_end.
+                if model_info.is_none() {
+                    if let (Some(p), Some(m)) = (
+                        msg.get("provider").and_then(|v| v.as_str()),
+                        msg.get("model").and_then(|v| v.as_str()),
+                    ) {
+                        model_info = Some((p.to_string(), m.to_string()));
+                    }
+                }
                 let Some(content) = msg.get("content").and_then(|c| c.as_array()) else {
                     continue;
                 };
@@ -558,7 +571,7 @@ fn parse_omp_json_output(ndjson: &[u8]) -> (String, Option<String>) {
         }
     }
 
-    (text_pieces.join("\n\n"), session_id)
+    (text_pieces.join("\n\n"), session_id, model_info)
 }
 
 // ---------------------------------------------------------------------------
