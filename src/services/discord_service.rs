@@ -102,6 +102,59 @@ fn save_sessions(sessions: &HashMap<String, String>) {
     }
 }
 
+/// Load model aliases from the bridge's `config.yaml`.
+///
+/// The YAML file must contain a top-level `model_aliases` mapping:
+/// ```yaml
+/// model_aliases:
+///   gemma: llama.cpp/gemma-4-31b-draft
+///   qwen:  llama.cpp/qwen3-coder-next
+/// ```
+/// Keys are stored lowercased for case-insensitive matching at runtime.
+/// A missing file or a file without a `model_aliases` key is silently
+/// treated as an empty map so the bridge keeps running.
+fn load_model_aliases(path: &str) -> HashMap<String, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Could not read aliases config {}: {}", path, e);
+            return HashMap::new();
+        }
+    };
+
+    // Parse as a generic YAML value so we can extract just the
+    // `model_aliases` key without a rigid top-level struct.
+    let doc: serde_yml::Value = match serde_yml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Could not parse aliases config {}: {}", path, e);
+            return HashMap::new();
+        }
+    };
+
+    let mapping = match doc.get("model_aliases").and_then(|v| v.as_mapping()) {
+        Some(m) => m,
+        None => {
+            tracing::warn!(
+                "No 'model_aliases' key found in {}; model aliases disabled",
+                path
+            );
+            return HashMap::new();
+        }
+    };
+
+    let mut aliases = HashMap::new();
+    for (k, v) in mapping {
+        if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+            // Store keys lowercased so the runtime lookup is always O(n) over
+            // lowercase needles without per-lookup allocation.
+            aliases.insert(key.to_lowercase(), val.to_string());
+        }
+    }
+    info!("Loaded {} model alias(es) from {}", aliases.len(), path);
+    aliases
+}
+
 // ---------------------------------------------------------------------------
 // Gateway event handler
 // ---------------------------------------------------------------------------
@@ -113,6 +166,9 @@ struct DiscordHandler {
     bot_id: Arc<std::sync::OnceLock<serenity::model::id::UserId>>,
     /// Per-channel OMP session IDs, shared with DiscordService for visibility.
     sessions: SessionMap,
+    /// Model alias map loaded from config.yaml at startup.
+    /// Key: lowercase substring to match; value: canonical OMP model ID.
+    model_aliases: HashMap<String, String>,
 }
 
 #[async_trait]
@@ -199,7 +255,7 @@ impl EventHandler for DiscordHandler {
             if q.starts_with("--model ") {
                 let parts: Vec<&str> = q.splitn(3, ' ').collect();
                 if parts.len() >= 3 {
-                    m = Some(resolve_model(parts[1]));
+                    m = Some(resolve_model(parts[1], &self.model_aliases));
                     q = parts[2];
                 }
             }
@@ -301,38 +357,30 @@ async fn send_chunked(ctx: &Context, channel_id: ChannelId, text: &str) {
 
 /// Resolve a user-supplied model alias to the canonical OMP model ID.
 ///
-/// Users can type short names like `gemma`, `qwen`, or `claude` in Discord.
-/// OMP requires either a fully-qualified provider/model string
-/// (e.g. `llama.cpp/gemma-4-31b-draft`) or the model name as listed by
-/// `omp --list-models` (e.g. `gemma-4-31b-draft` under the `llama.cpp`
-/// provider).  If the raw alias already looks like a valid OMP name it is
-/// returned as-is; otherwise we do a case-insensitive prefix/substring
-/// search against the known local-model table.
+/// `aliases` is the map loaded from `config.yaml` at startup:
+///   key   = lowercase substring to match (e.g. `"gemma"`)
+///   value = canonical OMP model ID (e.g. `"llama.cpp/gemma-4-31b-draft"`)
 ///
-/// Unknown aliases are returned unchanged — OMP will produce its own error
-/// message, which surfaces back to Discord.
-fn resolve_model(raw: &str) -> String {
-    // Table: (substring to match in lowercased alias) → canonical OMP model ID.
-    // Add new local models here whenever llama-swap's config.yaml changes.
-    const LOCAL_MODELS: &[(&str, &str)] = &[
-        ("gemma",  "llama.cpp/gemma-4-31b-draft"),
-        ("qwen",   "llama.cpp/qwen3-coder-next"),
-    ];
-
+/// Resolution rules (first match wins):
+/// 1. If the raw alias already contains `/` or `.` it is fully-qualified — pass through.
+/// 2. Case-insensitive substring search through the alias map.
+/// 3. No match — return verbatim; OMP surfaces its own unknown-model error.
+fn resolve_model(raw: &str, aliases: &HashMap<String, String>) -> String {
     let lower = raw.to_lowercase();
 
-    // Already fully-qualified (contains a slash or a dot) — pass through.
+    // Already fully-qualified — pass through unchanged.
     if lower.contains('/') || lower.contains('.') {
         return raw.to_string();
     }
 
-    for (needle, canonical) in LOCAL_MODELS {
-        if lower.contains(needle) {
-            return canonical.to_string();
+    for (needle, canonical) in aliases {
+        if lower.contains(needle.as_str()) {
+            tracing::debug!("resolved alias {:?} -> {:?}", raw, canonical);
+            return canonical.clone();
         }
     }
 
-    // Unknown alias — return verbatim; OMP will report the error.
+    // Unknown alias — pass through; OMP will report the error.
     raw.to_string()
 }
 
@@ -494,10 +542,15 @@ impl DiscordService {
         // Load persisted sessions so conversation history survives restarts.
         let sessions: SessionMap = Arc::new(Mutex::new(load_sessions()));
 
+        // Load model aliases from config.yaml.  Missing file is non-fatal:
+        // warn and continue with an empty map (all aliases pass through to OMP).
+        let model_aliases = load_model_aliases(&config.aliases_config_path);
+
         let handler = DiscordHandler {
             config,
             bot_id: bot_id.clone(),
             sessions,
+            model_aliases,
         };
 
         let mut client = ClientBuilder::new(

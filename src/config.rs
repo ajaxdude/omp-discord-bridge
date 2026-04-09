@@ -18,6 +18,10 @@ pub struct Config {
     /// Override with OMP_WORK_DIR in .env to point at a specific project root.
     #[serde(default = "default_omp_work_dir")]
     pub omp_work_dir: String,
+    /// Path to config.yaml for model aliases.
+    /// Defaults to $HOME/.config/omp-discord-bridge/config.yaml.
+    #[serde(default = "default_aliases_config_path")]
+    pub aliases_config_path: String,
 }
 
 fn default_discord_prefix() -> String {
@@ -30,6 +34,11 @@ fn default_omp_path() -> String {
 
 fn default_omp_work_dir() -> String {
     env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+}
+
+fn default_aliases_config_path() -> String {
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{home}/.config/omp-discord-bridge/config.yaml")
 }
 
 impl Config {
@@ -48,11 +57,15 @@ impl Config {
         let omp_work_dir = env::var("OMP_WORK_DIR")
             .unwrap_or_else(|_| default_omp_work_dir());
 
+
+        let aliases_config_path = env::var("BRIDGE_CONFIG")
+            .unwrap_or_else(|_| default_aliases_config_path());
         Ok(Self {
             discord_token,
             discord_prefix,
             omp_path,
             omp_work_dir,
+            aliases_config_path,
         })
     }
 
@@ -78,11 +91,15 @@ impl Config {
         let omp_work_dir = env::var("OMP_WORK_DIR")
             .unwrap_or(config.omp_work_dir);
 
+        let aliases_config_path = env::var("BRIDGE_CONFIG")
+            .unwrap_or(config.aliases_config_path);
+
         Ok(Self {
             discord_token,
             discord_prefix,
             omp_path,
             omp_work_dir,
+            aliases_config_path,
         })
     }
 
