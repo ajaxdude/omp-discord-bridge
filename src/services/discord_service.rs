@@ -264,31 +264,79 @@ impl EventHandler for DiscordHandler {
         let model = model_owned.as_deref();
 
         // Look up the existing session for this channel (if any).
-        let session_id = {
+        //
+        // When the user supplies --model we deliberately ignore any stored session:
+        // sessions are model-scoped in OMP and resuming a Claude session as Gemma
+        // (or vice-versa) causes an immediate "session not found" rejection.
+        // The stored session is preserved so model-less follow-up messages can
+        // still resume the previous thread.
+        let session_id: Option<String> = if model.is_some() {
+            info!(
+                "Model override {:?} — skipping session resume for channel {}",
+                model, msg.channel_id
+            );
+            None
+        } else {
             let sessions = self.sessions.lock().await;
             sessions.get(&msg.channel_id.to_string()).cloned()
         };
 
         if let Some(ref sid) = session_id {
             info!("Resuming session {} for channel {}", sid, msg.channel_id);
-        } else {
+        } else if model.is_none() {
             info!("Starting new session for channel {}", msg.channel_id);
         }
 
         // Broadcast a typing indicator while OMP processes — best-effort, ignore errors.
         let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
 
-        match invoke_omp(
-            &self.config.omp_path,
-            &self.config.omp_work_dir,
-            model,
-            actual_query,
-            session_id.as_deref(),
-        )
-        .await
-        {
+        // Helper: run OMP and, if it fails with a stale-session error, clear the
+        // session and retry once without --resume before giving up.
+        let result = {
+            let first = invoke_omp(
+                &self.config.omp_path,
+                &self.config.omp_work_dir,
+                model,
+                actual_query,
+                session_id.as_deref(),
+            )
+            .await;
+
+            match first {
+                // Success — use the result directly.
+                Ok(v) => Ok(v),
+                // Session-not-found: clear the stale entry and retry fresh.
+                Err(ref e) if e.contains("not found") && session_id.is_some() => {
+                    tracing::warn!(
+                        "Stale session for channel {} cleared; retrying without --resume",
+                        msg.channel_id
+                    );
+                    {
+                        let mut sessions = self.sessions.lock().await;
+                        sessions.remove(&msg.channel_id.to_string());
+                        save_sessions(&sessions);
+                    }
+                    // One retry without --resume.
+                    invoke_omp(
+                        &self.config.omp_path,
+                        &self.config.omp_work_dir,
+                        model,
+                        actual_query,
+                        None,
+                    )
+                    .await
+                }
+                // Any other error — propagate as-is.
+                Err(e) => Err(e),
+            }
+        };
+
+        match result {
             Ok((response, new_session)) => {
                 // Persist the new (or same) session ID for the next message.
+                // When a model override was used we still save the returned
+                // session so subsequent model-less messages can continue the
+                // same thread.
                 if let Some(sid) = new_session {
                     let mut sessions = self.sessions.lock().await;
                     sessions.insert(msg.channel_id.to_string(), sid.clone());
@@ -304,17 +352,16 @@ impl EventHandler for DiscordHandler {
                 send_chunked(&ctx, msg.channel_id, &text).await;
             }
             Err(e) => {
-                // If we had an active session and it failed, clear it so the
-                // user doesn't keep hitting a broken session.  They can just
-                // resend the message to start fresh.
-                if session_id.is_some() {
+                // Clear any session that might have contributed to the error.
+                {
                     let mut sessions = self.sessions.lock().await;
-                    sessions.remove(&msg.channel_id.to_string());
-                    save_sessions(&sessions);
-                    tracing::warn!(
-                        "Cleared broken session for channel {} after error",
-                        msg.channel_id
-                    );
+                    if sessions.remove(&msg.channel_id.to_string()).is_some() {
+                        save_sessions(&sessions);
+                        tracing::warn!(
+                            "Cleared session for channel {} after unrecoverable error",
+                            msg.channel_id
+                        );
+                    }
                 }
                 tracing::error!("OMP invocation failed: {}", e);
                 let _ = msg
