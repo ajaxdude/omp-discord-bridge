@@ -32,7 +32,8 @@ CURRENT_PATH=$PATH
 cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=Oh My Pi Discord Bridge
-After=network.target
+After=network.target omp-update.service
+Wants=omp-update.service
 
 [Service]
 Type=simple

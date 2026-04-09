@@ -19,14 +19,25 @@
 //! to OMP:
 //!
 //! - `!ping`          → immediate "Pong!" health-check reply
-//! - `!omp <query>`   → forwards <query> to the OMP CLI via stdin
+//! - `!omp reset`     → clears the active OMP session for the current channel
+//! - `!omp <query>`   → forwards <query> to the OMP CLI; reply sent back to Discord
 //! - `@bot <query>`   → same as above, triggered by @mention
+//!
+//! # Session continuity
+//!
+//! Each Discord channel maps to a persistent OMP session.  When a query arrives,
+//! the bridge resumes the channel's existing session via `omp --resume <id>`,
+//! giving the agent full conversation history across messages.  Session IDs are
+//! persisted to disk (~/.local/share/omp-discord-bridge/sessions.json) so they
+//! survive service restarts.  Use `!omp reset` in a channel to start a new session.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serenity::all::{ChannelId, Context, EventHandler, GatewayIntents, GetMessages, Message, Ready};
 use serenity::async_trait;
 use serenity::client::ClientBuilder;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::config::Config;
@@ -49,6 +60,49 @@ pub struct ChannelMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Session persistence
+// ---------------------------------------------------------------------------
+
+/// Channel-ID (string snowflake) → OMP session ID.
+type SessionMap = Arc<Mutex<HashMap<String, String>>>;
+
+fn sessions_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(home)
+        .join(".local/share/omp-discord-bridge/sessions.json")
+}
+
+fn load_sessions() -> HashMap<String, String> {
+    let path = sessions_path();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content) {
+            info!("Loaded {} session(s) from {}", map.len(), path.display());
+            return map;
+        }
+    }
+    HashMap::new()
+}
+
+/// Write the session map to disk.  Best-effort — failures are logged, not fatal.
+fn save_sessions(sessions: &HashMap<String, String>) {
+    let path = sessions_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Could not create session dir {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    match serde_json::to_string(sessions) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("Could not write sessions to {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => tracing::warn!("Could not serialize sessions: {}", e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Gateway event handler
 // ---------------------------------------------------------------------------
 
@@ -56,14 +110,14 @@ struct DiscordHandler {
     /// Bot configuration — command prefix and OMP executable path.
     config: Config,
     /// The bot's own user ID, populated once the `ready` event fires.
-    /// Used to detect @mention triggers.
     bot_id: Arc<std::sync::OnceLock<serenity::model::id::UserId>>,
+    /// Per-channel OMP session IDs, shared with DiscordService for visibility.
+    sessions: SessionMap,
 }
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
-        // Capture the bot's own user ID so the message handler can strip @mentions.
         let _ = self.bot_id.set(ready.user.id);
         info!(
             "Discord bot connected as: {} (ID: {})",
@@ -78,19 +132,45 @@ impl EventHandler for DiscordHandler {
         }
 
         let prefix = &self.config.discord_prefix;
-
-        // Classify the message and extract the OMP query, or handle inline.
         let mut text = msg.content.trim();
 
+        // !ping health check
         if text == format!("{}ping", prefix) {
             let now = serenity::all::Timestamp::now();
-            let now_f64 = now.unix_timestamp() as f64 + (now.nanosecond() as f64 / 1_000_000_000.0);
-            let msg_f64 = msg.timestamp.unix_timestamp() as f64 + (msg.timestamp.nanosecond() as f64 / 1_000_000_000.0);
+            let now_f64 = now.unix_timestamp() as f64
+                + (now.nanosecond() as f64 / 1_000_000_000.0);
+            let msg_f64 = msg.timestamp.unix_timestamp() as f64
+                + (msg.timestamp.nanosecond() as f64 / 1_000_000_000.0);
             let latency = (now_f64 - msg_f64).max(0.0);
-            let _ = msg.channel_id.say(&ctx.http, format!("Pong! {:.3}s", latency)).await;
+            let _ = msg
+                .channel_id
+                .say(&ctx.http, format!("Pong! {:.3}s", latency))
+                .await;
             return;
         }
 
+        // !omp reset — clear the OMP session for this channel so the next
+        // message starts a fresh conversation.
+        if text == format!("{}omp reset", prefix) {
+            let channel_key = msg.channel_id.to_string();
+            let had_session = {
+                let mut sessions = self.sessions.lock().await;
+                let removed = sessions.remove(&channel_key).is_some();
+                if removed {
+                    save_sessions(&sessions);
+                }
+                removed
+            };
+            let reply = if had_session {
+                "Session cleared. Starting fresh on your next message."
+            } else {
+                "No active session for this channel."
+            };
+            let _ = msg.channel_id.say(&ctx.http, reply).await;
+            return;
+        }
+
+        // Classify the message: !omp <query> or @mention <query>.
         if let Some(rest) = text.strip_prefix(&format!("{}omp", prefix)) {
             text = rest.trim();
         } else if let Some(bot_id) = self.bot_id.get() {
@@ -109,6 +189,7 @@ impl EventHandler for DiscordHandler {
 
         let query = text.to_string();
 
+        // Optional --model override: `!omp --model opus <query>`
         let (model, actual_query) = {
             let mut q = query.as_str();
             let mut m = None;
@@ -122,11 +203,39 @@ impl EventHandler for DiscordHandler {
             (m, q)
         };
 
+        // Look up the existing session for this channel (if any).
+        let session_id = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(&msg.channel_id.to_string()).cloned()
+        };
+
+        if let Some(ref sid) = session_id {
+            info!("Resuming session {} for channel {}", sid, msg.channel_id);
+        } else {
+            info!("Starting new session for channel {}", msg.channel_id);
+        }
+
         // Broadcast a typing indicator while OMP processes — best-effort, ignore errors.
         let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
 
-        match invoke_omp(&self.config.omp_path, model, actual_query).await {
-            Ok(response) => {
+        match invoke_omp(
+            &self.config.omp_path,
+            &self.config.omp_work_dir,
+            model,
+            actual_query,
+            session_id.as_deref(),
+        )
+        .await
+        {
+            Ok((response, new_session)) => {
+                // Persist the new (or same) session ID for the next message.
+                if let Some(sid) = new_session {
+                    let mut sessions = self.sessions.lock().await;
+                    sessions.insert(msg.channel_id.to_string(), sid.clone());
+                    save_sessions(&sessions);
+                    info!("Saved session {} for channel {}", sid, msg.channel_id);
+                }
+
                 let text = if response.is_empty() {
                     "(OMP returned an empty response)".to_string()
                 } else {
@@ -135,6 +244,18 @@ impl EventHandler for DiscordHandler {
                 send_chunked(&ctx, msg.channel_id, &text).await;
             }
             Err(e) => {
+                // If we had an active session and it failed, clear it so the
+                // user doesn't keep hitting a broken session.  They can just
+                // resend the message to start fresh.
+                if session_id.is_some() {
+                    let mut sessions = self.sessions.lock().await;
+                    sessions.remove(&msg.channel_id.to_string());
+                    save_sessions(&sessions);
+                    tracing::warn!(
+                        "Cleared broken session for channel {} after error",
+                        msg.channel_id
+                    );
+                }
                 tracing::error!("OMP invocation failed: {}", e);
                 let _ = msg
                     .channel_id
@@ -144,6 +265,10 @@ impl EventHandler for DiscordHandler {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OMP subprocess invocation
+// ---------------------------------------------------------------------------
 
 /// Send a long string as successive Discord messages capped at 1 900 bytes each.
 ///
@@ -170,22 +295,46 @@ async fn send_chunked(ctx: &Context, channel_id: ChannelId, text: &str) {
     }
 }
 
-/// Invoke the OMP CLI with `query` as an argument, and return stdout.
+/// Invoke the OMP CLI and return `(assistant_text, session_id)`.
 ///
-/// OMP is expected to process the query, write a single response to
-/// stdout, and then exit.  A 1200-second timeout is enforced; the bot replies with
-/// an error message if OMP does not respond in time.
-async fn invoke_omp(omp_path: &str, model: Option<&str>, query: &str) -> Result<String, String> {
+/// Uses `--mode json` so OMP writes NDJSON to stdout regardless of whether a
+/// TTY is attached.  Only the assistant's human-readable text blocks are
+/// extracted — tool calls, tool results, thinking blocks, and session metadata
+/// are discarded by `parse_omp_json_output`.
+///
+/// If `session_id` is `Some`, the session is resumed via `--resume <id>` so
+/// the agent retains full conversation history.  The session ID returned is
+/// whatever OMP reports in the `{"type":"session"}` event; pass it back on the
+/// next call to continue the same thread.
+///
+/// A 1 200-second (20 min) timeout is enforced.
+async fn invoke_omp(
+    omp_path: &str,
+    work_dir: &str,
+    model: Option<&str>,
+    query: &str,
+    session_id: Option<&str>,
+) -> Result<(String, Option<String>), String> {
     use std::process::Stdio;
     use tokio::process::Command;
 
     let mut cmd = Command::new(omp_path);
     cmd.stdin(Stdio::null());
+    cmd.current_dir(work_dir);
     cmd.arg("-p");
+    cmd.arg("--mode");
+    cmd.arg("json");
+
+    if let Some(sid) = session_id {
+        cmd.arg("--resume");
+        cmd.arg(sid);
+    }
+
     if let Some(m) = model {
         cmd.arg("--model");
         cmd.arg(m);
     }
+
     cmd.arg(query);
 
     let output = tokio::time::timeout(
@@ -196,16 +345,84 @@ async fn invoke_omp(omp_path: &str, model: Option<&str>, query: &str) -> Result<
     .map_err(|_| "OMP timed out after 20 minutes (1200 seconds)".to_string())?
     .map_err(|e| format!("OMP process I/O error: {}", e))?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
+    // A non-zero exit with no stdout is a real failure (e.g. bad session ID,
+    // missing binary).  A non-zero exit WITH stdout means OMP ran but
+    // encountered an application-level error after producing some output —
+    // surface whatever text we extracted rather than swallowing it.
+    if !output.status.success() && output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
+        return Err(if stderr.is_empty() {
             format!("OMP exited with status {}", output.status)
         } else {
             stderr
-        })
+        });
     }
+
+    Ok(parse_omp_json_output(&output.stdout))
+}
+
+/// Parse OMP's `--mode json` NDJSON output.
+///
+/// Returns `(assistant_text, session_id)`.
+///
+/// Events we care about:
+/// - `{"type":"session","id":"<id>"}` — the active session ID (first event)
+/// - `{"type":"message_end","message":{"role":"assistant","content":[...]}}` —
+///   a completed assistant turn; we collect `{"type":"text","text":"..."}` items
+///   and ignore `toolCall` items.
+///
+/// All other event types (tool_execution_*, turn_*, message_update, thinking, …)
+/// are skipped.  Multiple assistant text blocks across a multi-turn session are
+/// joined with a blank line.
+fn parse_omp_json_output(ndjson: &[u8]) -> (String, Option<String>) {
+    let content = String::from_utf8_lossy(ndjson);
+    let mut text_pieces: Vec<String> = Vec::new();
+    let mut session_id: Option<String> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(event_type) = val.get("type").and_then(|t| t.as_str()) else {
+            continue;
+        };
+
+        match event_type {
+            "session" => {
+                // {"type":"session","id":"<id>",...} — first event in any run.
+                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
+                    session_id = Some(id.to_string());
+                }
+            }
+            "message_end" => {
+                // Extract text content from completed assistant messages only.
+                let Some(msg) = val.get("message") else { continue };
+                if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                    continue;
+                }
+                let Some(content) = msg.get("content").and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                for item in content {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            let trimmed = text.trim().to_string();
+                            if !trimmed.is_empty() {
+                                text_pieces.push(trimmed);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (text_pieces.join("\n\n"), session_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +450,13 @@ impl DiscordService {
         // Shared cell written by `ready`, read by `message`.
         let bot_id = Arc::new(std::sync::OnceLock::new());
 
+        // Load persisted sessions so conversation history survives restarts.
+        let sessions: SessionMap = Arc::new(Mutex::new(load_sessions()));
+
         let handler = DiscordHandler {
             config,
             bot_id: bot_id.clone(),
+            sessions,
         };
 
         let mut client = ClientBuilder::new(
