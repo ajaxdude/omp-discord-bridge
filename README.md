@@ -1,20 +1,68 @@
 # Oh My Pi Discord Bridge
 
-A standalone Discord bot and MCP (Model Context Protocol) server that bridges [Oh My Pi (OMP)](https://github.com/ajaxdude/omp) with Discord. Send coding tasks from any Discord channel, get the agent's full response back — with persistent session continuity so the conversation carries across messages.
+A standalone Discord bot and MCP (Model Context Protocol) server that bridges [Oh My Pi (OMP)](https://github.com/ajaxdude/omp) with Discord. Send queries from any Discord channel, get the agent's full response back — with persistent session continuity so the conversation carries across messages.
 
 ## Features
 
-- **Persistent sessions per channel** — each Discord channel maintains its own OMP session, so the agent remembers what you were working on across messages. Sessions survive service restarts.
-- **Dynamic model switching** — switch models on the fly with `--model` in any message.
-- **Boot automation** — an `omp-update` systemd service runs `update-ai.sh` at login to keep OMP and your toolboxes current before the bridge starts.
+- **Persistent sessions per channel** — each Discord channel maintains its own OMP session so the agent remembers context across messages. Sessions survive service restarts.
+- **Local model routing** — `--model gemma` or `--model qwen` routes directly to your local llama-swap instance. Short aliases are resolved from a config file you edit without recompiling.
+- **Dynamic model switching** — switch models on the fly with `--model` in any message. Fully-qualified OMP model IDs (e.g. `llama.cpp/gemma-4-31b-draft`) always pass through unchanged.
 - **MCP server** — also acts as an MCP server over stdio so OMP agents can read channels, send messages, and upload files as tools.
-- **Host-native execution** — runs directly on your machine as a user-level `systemd` service, reusing your existing `omp` install and local `llama.cpp` models.
+- **Host-native execution** — runs directly on your machine as a user-level `systemd` service, reusing your existing `omp` install and local models.
+- **Singleton enforcement** — a lockfile (`flock` on `/tmp/omp-discord-bridge.lock`) ensures only one live bot instance holds the Discord gateway, even if OMP spawns extra bridge processes.
 
 ## Prerequisites
 
 - A Discord bot token ([create one here](https://discord.com/developers/applications))
 - Enable **Message Content Intent** under Privileged Gateway Intents in the Discord Developer Portal
 - Rust 1.70+ and your existing `oh-my-pi` (`omp`) installation
+- [llama-swap](https://github.com/mostlygeek/llama-swap) running locally if you want local model support
+
+## Architecture
+
+```
+Discord message
+      │
+      ▼
+Discord Gateway (serenity)
+      │
+      │  parse --model <alias>
+      │  resolve_model() ──► ~/.config/omp-discord-bridge/config.yaml
+      ▼
+invoke_omp()
+  omp -p --mode json [--resume <session-id>] [--model <id>] <query>
+      │
+      │  NDJSON stdout
+      ▼
+parse_omp_json_output()
+  extracts assistant text blocks
+  (tool calls, tool results, thinking → discarded)
+      │
+      ▼
+send_chunked() → Discord reply (≤1900 bytes per message)
+      │
+      ▼
+session_id saved to ~/.local/share/omp-discord-bridge/sessions.json
+```
+
+### Local model path (llama-swap)
+
+OMP v14's `llama.cpp` provider calls `/responses` (no `/v1` prefix). llama-swap only
+registers `/v1/responses`. A thin Python proxy bridges the gap:
+
+```
+OMP  →  :8080 (llama-swap-proxy)  →  :8081 (llama-swap)  →  llama-server
+```
+
+The proxy rewrites two paths and forwards everything else unchanged:
+
+| Incoming | Forwarded to upstream |
+|---|---|
+| `POST /responses` | `POST /v1/responses` |
+| `POST /chat/completions` | `POST /v1/chat/completions` |
+| anything else | unchanged |
+
+Both `llama-swap` and `llama-swap-proxy` run as user-level systemd services and start on boot.
 
 ## Setup
 
@@ -41,91 +89,111 @@ DISCORD_TOKEN=your_discord_bot_token_here
 
 See [Configuration](#configuration) for all options.
 
-### 3. Install the service
+### 3. Install the bridge service
 
 ```bash
 ./install-service.sh
 ```
 
-This registers the bridge as a user-level `systemd` service that starts automatically on login.
+This registers and starts the bridge as a user-level `systemd` service that launches automatically on login.
 
-### 4. Boot automation — keep OMP up to date
+### 4. Set up the llama-swap proxy
 
-Create a one-shot service that runs your update script before the bridge starts:
+If you use local models via llama-swap, move llama-swap to port 8081 and run the proxy on 8080:
 
-```bash
-# ~/.config/systemd/user/omp-update.service
+**`~/.config/systemd/user/llama-swap.service`** — add `--listen 0.0.0.0:8081` to the `ExecStart` line.
+
+**`~/.config/systemd/user/llama-swap-proxy.service`**:
+
+```ini
 [Unit]
-Description=Oh My Pi and llama toolbox update
-After=network-online.target
-Wants=network-online.target
+Description=llama-swap proxy — rewrites /responses → /v1/responses for OMP compatibility
+After=llama-swap.service
+Requires=llama-swap.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/home/<user>/ai
-ExecStart=/home/<user>/ai/update-ai.sh
-Environment="PATH=/home/<user>/.bun/bin:/home/<user>/.cargo/bin:/home/<user>/.local/bin:/usr/local/bin:/usr/bin"
-StandardOutput=journal
-StandardError=journal
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/llama-swap-proxy.py
+Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=default.target
 ```
 
-Enable it:
+The proxy script is at `~/.local/bin/llama-swap-proxy.py` (installed alongside this repo).
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable omp-update.service
+systemctl --user enable --now llama-swap-proxy.service
 ```
 
-The bridge service already declares `After=omp-update.service` and `Wants=omp-update.service`, so OMP is always current before the bot comes online.
+### 5. Configure model aliases
+
+Edit `~/.config/omp-discord-bridge/config.yaml` to map short names to canonical OMP model IDs:
+
+```yaml
+model_aliases:
+  gemma: "llama.cpp/gemma-4-31b-draft"
+  qwen:  "llama.cpp/qwen3-coder-next"
+```
+
+- Keys are matched **case-insensitively as substrings**: `gemma`, `Gemma`, `gemma4` all resolve to `llama.cpp/gemma-4-31b-draft`.
+- Fully-qualified names (containing `/` or `.`) always pass through unchanged — no entry needed.
+- **No recompile required** to add a new model. Edit the file and restart the service.
+
+```bash
+systemctl --user restart omp-discord-bridge.service
+```
 
 ## Discord commands
 
-All commands require the `!omp` prefix or an @mention of the bot. The prefix can be changed with the `DISCORD_PREFIX` env var.
+All commands require the `!omp` prefix or an @mention of the bot. The prefix can be changed with `DISCORD_PREFIX` in `.env`.
 
 | Command | Description |
 |---|---|
 | `!ping` | Health check — returns one-way latency, e.g. `Pong! 0.042s` |
-| `!omp <query>` | Send a query to the OMP agent. The full response is sent back to the channel. |
+| `!omp <query>` | Send a query to the OMP agent using the default model. |
 | `@ompbot <query>` | Same as `!omp <query>`, triggered by mentioning the bot. |
-| `!omp --model <name> <query>` | Use a specific model for this query, e.g. `--model opus` or `--model llama.cpp`. |
-| `!omp reset` | Clear the active OMP session for this channel. The next message starts a fresh conversation. Use this when switching projects. |
+| `!omp --model <alias> <query>` | Use a specific model for this query (see alias table below). |
+| `!omp reset` | Clear the active OMP session for this channel. The next message starts a fresh conversation. |
+
+### Model alias examples
+
+```
+!omp --model gemma what is the capital of France?
+!omp --model qwen  write a bubble sort in Rust
+!omp --model llama.cpp/gemma-4-31b-draft explain speculative decoding
+@ompbot --model gemma summarise this code
+```
+
+The alias `gemma` resolves to `llama.cpp/gemma-4-31b-draft` via the config file. The full OMP model ID is accepted directly and needs no alias entry.
 
 ### Session continuity
 
-Each channel has its own OMP session. The bridge passes `--resume <session-id>` to `omp` on every message so the agent retains the full conversation history. Session IDs are persisted to:
+Each channel has its own OMP session. The bridge passes `--resume <session-id>` to `omp` on every message so the agent retains full conversation history. Session IDs are persisted to:
 
 ```
 ~/.local/share/omp-discord-bridge/sessions.json
 ```
 
-If a session becomes invalid (e.g. session files were cleaned up), the bridge automatically clears it and the next message starts fresh. You can also clear a session manually with `!omp reset`.
-
-### Examples
-
-```
-!omp write a Python script that tails a log file and highlights errors
-!omp --model opus refactor this function to use async/await
-!omp what did we decide about the database schema earlier?
-!omp reset
-@ompbot explain the difference between Arc and Rc in Rust
-```
+If a session becomes invalid (e.g. session files were cleaned up), the bridge automatically clears it and the next message starts fresh. Use `!omp reset` to manually clear a session when switching projects.
 
 ## Service management
 
 ```bash
-# View live logs
+# View live bridge logs
 journalctl --user -u omp-discord-bridge.service -f
 
-# View update logs
-journalctl --user -u omp-update.service
+# View proxy logs
+journalctl --user -u llama-swap-proxy.service -f
 
-# Stop / start / restart
-systemctl --user stop omp-discord-bridge.service
-systemctl --user start omp-discord-bridge.service
+# Stop / start / restart the bridge
+systemctl --user stop    omp-discord-bridge.service
+systemctl --user start   omp-discord-bridge.service
+systemctl --user restart omp-discord-bridge.service
+
+# Restart after editing config.yaml (no recompile needed)
 systemctl --user restart omp-discord-bridge.service
 ```
 
@@ -138,35 +206,23 @@ All options are set in `.env` in the project root.
 | `DISCORD_TOKEN` | *(required)* | Your Discord bot token |
 | `DISCORD_PREFIX` | `!` | Command prefix for bot commands |
 | `OMP_PATH` | `omp` | Path to the `omp` binary (resolved via `PATH` if not absolute) |
-| `OMP_WORK_DIR` | `$HOME` | Working directory for OMP subprocesses. Set to your project root so the agent's file tools resolve relative to the right place. |
+| `OMP_WORK_DIR` | `$HOME` | Working directory for OMP subprocesses. Set to your project root so the agent's file tools resolve relative paths correctly. |
+| `BRIDGE_CONFIG` | `~/.config/omp-discord-bridge/config.yaml` | Path to the bridge YAML config file (model aliases). |
 
-## Architecture
+## Adding a new local model
 
-```
-Discord Message
-      │
-      ▼
-Discord Gateway (serenity)
-      │
-      │  !omp <query>  or  @mention <query>
-      ▼
-invoke_omp()
-  omp -p --mode json [--resume <session-id>] <query>
-      │
-      │  NDJSON stdout
-      ▼
-parse_omp_json_output()
-  extracts assistant text blocks only
-  (tool calls, tool results, thinking → discarded)
-      │
-      ▼
-send_chunked() → Discord reply (≤1900 bytes per message)
-      │
-      ▼
-session_id saved to ~/.local/share/omp-discord-bridge/sessions.json
-```
+1. Add the model to `~/.config/llama-swap/config.yaml` under `models:`.
+2. Add an alias entry to `~/.config/omp-discord-bridge/config.yaml`:
+   ```yaml
+   model_aliases:
+     mymodel: "llama.cpp/<llama-swap-model-id>"
+   ```
+3. Restart both services:
+   ```bash
+   systemctl --user restart llama-swap.service llama-swap-proxy.service omp-discord-bridge.service
+   ```
 
-The bridge also runs as an MCP server over stdio, exposing Discord tools (`send_message`, `read_channel`, `list_servers`, `mention_user`, `post_file`) to any connected OMP agent.
+That's it — no recompile required.
 
 ## Local development
 
@@ -177,9 +233,11 @@ RUST_LOG=debug ./target/release/omp_discord_bridge
 ## Troubleshooting
 
 - **Bot doesn't respond** — check that Message Content Intent is enabled in the Discord Developer Portal.
+- **Claude answers instead of local model** — the alias wasn't resolved. Check `~/.config/omp-discord-bridge/config.yaml` exists and contains the right key. Restart the service after editing.
+- **404 from llama-swap** — OMP is hitting `:8080` but `llama-swap-proxy` isn't running. Check `systemctl --user status llama-swap-proxy.service`.
 - **Empty responses** — make sure `omp` is on the PATH the service uses. Check `OMP_PATH` in `.env` or set it to an absolute path.
 - **Session errors** — run `!omp reset` in the affected channel to clear the stale session.
-- **OMP timeouts** — the bridge enforces a 20-minute timeout. If your local model needs more time, the timeout is hardcoded in `discord_service.rs` (`1200` seconds).
+- **OMP timeouts** — the bridge enforces a 20-minute timeout per query. This is hardcoded as `1200` seconds in `discord_service.rs`.
 
 ## License
 
