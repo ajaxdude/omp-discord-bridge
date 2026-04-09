@@ -1050,6 +1050,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dotenv",
+ "libc",
  "rust-mcp-macros",
  "rust-mcp-sdk",
  "serde",

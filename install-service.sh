@@ -41,6 +41,7 @@ Environment="PATH=${CURRENT_PATH}"
 EnvironmentFile=${PROJECT_DIR}/.env
 Environment="RUST_LOG=info"
 ExecStart=${TARGET_BIN}
+StandardInput=null
 Restart=always
 RestartSec=5
 

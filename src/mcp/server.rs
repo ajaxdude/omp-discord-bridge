@@ -76,7 +76,19 @@ impl McpServer {
         };
 
         let server = server_runtime::create_server(options);
-        server.start().await.map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+        // server.start() returns when the MCP client disconnects (e.g. stdin closes).
+        // That is fine — the Discord gateway task keeps running. We wait here until
+        // a shutdown signal (SIGINT / SIGTERM) arrives so the process doesn't exit.
+        match server.start().await {
+            Ok(_) => info!("MCP client disconnected; Discord gateway still active."),
+            Err(e) => tracing::warn!("MCP server closed: {}", e),
+        }
+
+        // Block until Ctrl-C or SIGTERM so the Discord bot keeps answering messages
+        // even when no MCP client is attached.
+        info!("Waiting for shutdown signal (Ctrl-C / SIGTERM)...");
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutdown signal received — exiting.");
 
         Ok(())
     }

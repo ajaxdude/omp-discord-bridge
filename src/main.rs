@@ -26,6 +26,30 @@ async fn main() -> anyhow::Result<()> {
         .with(filter)
         .init();
 
+    // Singleton guard: only one instance may run at a time.
+    //
+    // Multiple instances arise when OMP sessions load the .mcp.json and each
+    // spawns the bridge as a subprocess. The first process to acquire the lock
+    // is the real bot; all others exit cleanly so the MCP client sees a clean
+    // exit (status 0) rather than an error.
+    let lock_path = std::env::temp_dir().join("omp-discord-bridge.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)?;
+    use std::os::unix::io::AsRawFd;
+    let locked = unsafe {
+        libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
+    if locked != 0 {
+        // Another instance is already running — exit quietly.
+        eprintln!("omp-discord-bridge: another instance is running, exiting.");
+        return Ok(());
+    }
+    // `lock_file` is held open for the lifetime of the process.
+    // When the process exits, the OS releases the lock automatically.
+    let _lock_guard = lock_file;
+
     info!("Starting Oh My Pi Discord Bridge MCP Server");
 
     // Load configuration
