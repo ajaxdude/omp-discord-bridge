@@ -8,7 +8,7 @@ This bridge allows you to interact with OMP directly through Discord channels, w
 
 - 🤖 **Native Chat Experience**: Chat naturally in Discord without needing command prefixes or mentions (unless you want to!).
 - 🧠 **Dynamic Model Switching**: Need more reasoning power? Switch models on the fly by adding `--model llama.cpp` or `--model gpt-4o` to your Discord messages.
-- 🐳 **Docker & Docker Compose**: Fully containerized for easy deployment and background execution.
+- ⚙️ **Host-Native Background Execution**: Runs directly on your machine as a `systemd` service so it can perfectly reuse your existing `omp` installation and local `llama.cpp` models without any containerization headaches or duplication!
 - 📡 **MCP Server Compatibility**: Acts as an MCP server over stdio for deep integration with OMP's agentic workflows.
 - 🛠️ **Full Tool Support**: Send messages, read channels, upload files, mention users, and ping for latency.
 
@@ -16,17 +16,19 @@ This bridge allows you to interact with OMP directly through Discord channels, w
 
 - A Discord bot token ([create one here](https://discord.com/developers/applications))
 - **Important**: Ensure you enable the **Message Content Intent** under the Privileged Gateway Intents in the Discord Developer Portal for your bot.
-- Docker and Docker Compose (recommended for deployment) OR Rust 1.70+ and [Bun](https://bun.sh/) (for local execution).
+- Rust 1.70+ and [Bun](https://bun.sh/) installed locally on your host machine.
+- Your existing installation of `oh-my-pi` (`omp`).
 
-## Deployment (Recommended)
+## Deployment (Recommended: systemd)
 
-The easiest way to run the bridge persistently in the background is via Docker Compose.
+The absolute best way to run this bridge is natively on your machine using a user-level `systemd` service. This ensures the bot starts automatically on boot and has full access to your host's `omp` tools, plugins, and local `llama.cpp` processes.
 
-### 1. Clone the Repository
+### 1. Clone and Build
 
 ```bash
 git clone https://github.com/ajaxdude/omp-discord-bridge.git
 cd omp-discord-bridge
+cargo build --release
 ```
 
 ### 2. Configure Environment
@@ -43,41 +45,27 @@ Ensure your `.env` file contains at minimum:
 DISCORD_TOKEN=your_discord_bot_token_here
 ```
 
-### 3. Start with Docker Compose
+### 3. Install and Start the Service
 
-Build and launch the container in the background:
+We've provided a simple script to register the bridge as a background service:
 
 ```bash
-docker compose up -d --build
+./install-service.sh
 ```
 
-The container automatically installs `oh-my-pi`, compiles the Rust bridge, and starts listening to Discord. It mounts your `~/.omp/agent` directory as a volume so that context and sessions are preserved across restarts.
+The script will configure `systemd` to keep the bot alive and launch it automatically. 
 
-To view logs:
-```bash
-docker compose logs -f
-```
+**Useful Commands:**
+- **View Live Logs:** `journalctl --user -u omp-discord-bridge.service -f`
+- **Stop Bot:** `systemctl --user stop omp-discord-bridge.service`
+- **Restart Bot:** `systemctl --user restart omp-discord-bridge.service`
 
-## Local Development & Usage
+## Local Development / Manual Run
 
-If you prefer to run the bridge directly on your host machine without Docker:
-
-### 1. Install Dependencies
-
-Ensure you have Rust, Cargo, Bun, and Oh My Pi installed globally:
+If you just want to run the bridge directly in your terminal for testing:
 
 ```bash
-curl -fsSL https://bun.sh/install | bash
-bun install -g oh-my-pi
-cargo build --release
-```
-
-### 2. Run the Bridge
-
-Start the bridge in the background so it stays alive:
-
-```bash
-RUST_LOG=info nohup ./target/release/omp_discord_bridge </dev/null >/tmp/omp-bridge.log 2>&1 &
+RUST_LOG=info ./target/release/omp_discord_bridge
 ```
 
 ## Using the Bot in Discord
@@ -87,7 +75,7 @@ Once the bot is online in your server, simply type your question or command into
 **Example Queries:**
 - `Write a Python script that calculates the Fibonacci sequence.`
 - `!ping` (Returns the current one-way latency, e.g., `Pong! 0.123s`)
-- `--model claude-sonnet summarize the main themes of cybernetics.`
+- `--model llama.cpp summarize the main themes of cybernetics.`
 
 ## Architecture
 
