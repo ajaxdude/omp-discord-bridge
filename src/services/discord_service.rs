@@ -189,19 +189,23 @@ impl EventHandler for DiscordHandler {
 
         let query = text.to_string();
 
-        // Optional --model override: `!omp --model opus <query>`
-        let (model, actual_query) = {
+        // Optional --model override: `!omp --model <alias> <query>`
+        //
+        // The raw alias (e.g. "gemma", "qwen", or a fully-qualified OMP model
+        // ID) is resolved to a canonical OMP model string by `resolve_model`.
+        let (model_owned, actual_query) = {
             let mut q = query.as_str();
-            let mut m = None;
+            let mut m: Option<String> = None;
             if q.starts_with("--model ") {
                 let parts: Vec<&str> = q.splitn(3, ' ').collect();
                 if parts.len() >= 3 {
-                    m = Some(parts[1]);
+                    m = Some(resolve_model(parts[1]));
                     q = parts[2];
                 }
             }
             (m, q)
         };
+        let model = model_owned.as_deref();
 
         // Look up the existing session for this channel (if any).
         let session_id = {
@@ -293,6 +297,43 @@ async fn send_chunked(ctx: &Context, channel_id: ChannelId, text: &str) {
         let _ = channel_id.say(&ctx.http, chunk).await;
         rest = remainder;
     }
+}
+
+/// Resolve a user-supplied model alias to the canonical OMP model ID.
+///
+/// Users can type short names like `gemma`, `qwen`, or `claude` in Discord.
+/// OMP requires either a fully-qualified provider/model string
+/// (e.g. `llama.cpp/gemma-4-31b-draft`) or the model name as listed by
+/// `omp --list-models` (e.g. `gemma-4-31b-draft` under the `llama.cpp`
+/// provider).  If the raw alias already looks like a valid OMP name it is
+/// returned as-is; otherwise we do a case-insensitive prefix/substring
+/// search against the known local-model table.
+///
+/// Unknown aliases are returned unchanged — OMP will produce its own error
+/// message, which surfaces back to Discord.
+fn resolve_model(raw: &str) -> String {
+    // Table: (substring to match in lowercased alias) → canonical OMP model ID.
+    // Add new local models here whenever llama-swap's config.yaml changes.
+    const LOCAL_MODELS: &[(&str, &str)] = &[
+        ("gemma",  "llama.cpp/gemma-4-31b-draft"),
+        ("qwen",   "llama.cpp/qwen3-coder-next"),
+    ];
+
+    let lower = raw.to_lowercase();
+
+    // Already fully-qualified (contains a slash or a dot) — pass through.
+    if lower.contains('/') || lower.contains('.') {
+        return raw.to_string();
+    }
+
+    for (needle, canonical) in LOCAL_MODELS {
+        if lower.contains(needle) {
+            return canonical.to_string();
+        }
+    }
+
+    // Unknown alias — return verbatim; OMP will report the error.
+    raw.to_string()
 }
 
 /// Invoke the OMP CLI and return `(assistant_text, session_id)`.
