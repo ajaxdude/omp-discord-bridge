@@ -1,0 +1,19 @@
+version: "3.8"
+services:
+  omp-discord-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omp-discord-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount the OMP package cache/agent folder to persist sessions and context
+      - ~/.omp/agent:/root/.omp/agent
+    environment:
+      - RUST_LOG=info
+      - OMP_PATH=omp
+      # For llama.cpp, you can uncomment and configure:
+      # - OMP_DEFAULT_MODEL=llama.cpp
+      # - OMP_LLAMA_CPP_URL=http://host.docker.internal:8080

@@ -12,10 +12,19 @@
 //!
 //! All tool-facing operations (send_message, read_channel, …) use the HTTP client
 //! directly and do not require the gateway to be established.
+//!
+//! # Inbound message handling
+//!
+//! The gateway event handler listens for Discord messages and routes commands
+//! to OMP:
+//!
+//! - `!ping`          → immediate "Pong!" health-check reply
+//! - `!omp <query>`   → forwards <query> to the OMP CLI via stdin
+//! - `@bot <query>`   → same as above, triggered by @mention
 
 use std::sync::Arc;
 
-use serenity::all::{Context, EventHandler, GatewayIntents, GetMessages, Ready};
+use serenity::all::{ChannelId, Context, EventHandler, GatewayIntents, GetMessages, Message, Ready};
 use serenity::async_trait;
 use serenity::client::ClientBuilder;
 use tracing::info;
@@ -40,15 +49,162 @@ pub struct ChannelMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway event handler (no-op — we only care about HTTP API access for now)
+// Gateway event handler
 // ---------------------------------------------------------------------------
 
-struct DiscordHandler;
+struct DiscordHandler {
+    /// Bot configuration — command prefix and OMP executable path.
+    config: Config,
+    /// The bot's own user ID, populated once the `ready` event fires.
+    /// Used to detect @mention triggers.
+    bot_id: Arc<std::sync::OnceLock<serenity::model::id::UserId>>,
+}
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
-        info!("Discord bot connected as: {}", ready.user.name);
+        // Capture the bot's own user ID so the message handler can strip @mentions.
+        let _ = self.bot_id.set(ready.user.id);
+        info!(
+            "Discord bot connected as: {} (ID: {})",
+            ready.user.name, ready.user.id
+        );
+    }
+
+    async fn message(&self, ctx: Context, msg: Message) {
+        // Ignore all bot messages — includes our own — to prevent response loops.
+        if msg.author.bot {
+            return;
+        }
+
+        let prefix = &self.config.discord_prefix;
+
+        // Classify the message and extract the OMP query, or handle inline.
+        let mut text = msg.content.trim();
+
+        if text == format!("{}ping", prefix) {
+            let now = serenity::all::Timestamp::now();
+            let now_f64 = now.unix_timestamp() as f64 + (now.nanosecond() as f64 / 1_000_000_000.0);
+            let msg_f64 = msg.timestamp.unix_timestamp() as f64 + (msg.timestamp.nanosecond() as f64 / 1_000_000_000.0);
+            let latency = (now_f64 - msg_f64).max(0.0);
+            let _ = msg.channel_id.say(&ctx.http, format!("Pong! {:.3}s", latency)).await;
+            return;
+        }
+
+        if let Some(rest) = text.strip_prefix(&format!("{}omp", prefix)) {
+            text = rest.trim();
+        } else if let Some(bot_id) = self.bot_id.get() {
+            let long_mention = format!("<@{}>", bot_id);
+            let nick_mention = format!("<@!{}>", bot_id);
+            if let Some(rest) = text.strip_prefix(&long_mention) {
+                text = rest.trim();
+            } else if let Some(rest) = text.strip_prefix(&nick_mention) {
+                text = rest.trim();
+            }
+        }
+
+        if text.is_empty() {
+            return;
+        }
+
+        let query = text.to_string();
+
+        let (model, actual_query) = {
+            let mut q = query.as_str();
+            let mut m = None;
+            if q.starts_with("--model ") {
+                let parts: Vec<&str> = q.splitn(3, ' ').collect();
+                if parts.len() >= 3 {
+                    m = Some(parts[1]);
+                    q = parts[2];
+                }
+            }
+            (m, q)
+        };
+
+        // Broadcast a typing indicator while OMP processes — best-effort, ignore errors.
+        let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+
+        match invoke_omp(&self.config.omp_path, model, actual_query).await {
+            Ok(response) => {
+                let text = if response.is_empty() {
+                    "(OMP returned an empty response)".to_string()
+                } else {
+                    response
+                };
+                send_chunked(&ctx, msg.channel_id, &text).await;
+            }
+            Err(e) => {
+                tracing::error!("OMP invocation failed: {}", e);
+                let _ = msg
+                    .channel_id
+                    .say(&ctx.http, format!("OMP error: {}", e))
+                    .await;
+            }
+        }
+    }
+}
+
+/// Send a long string as successive Discord messages capped at 1 900 bytes each.
+///
+/// Discord enforces a 2 000-character hard limit per message.  We stay well
+/// under it and always split on a valid UTF-8 char boundary so no codepoint
+/// is ever mangled.
+async fn send_chunked(ctx: &Context, channel_id: ChannelId, text: &str) {
+    const MAX_BYTES: usize = 1_900;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split = if rest.len() <= MAX_BYTES {
+            rest.len()
+        } else {
+            // Walk back from MAX_BYTES until we land on a char boundary.
+            let mut idx = MAX_BYTES;
+            while !rest.is_char_boundary(idx) {
+                idx -= 1;
+            }
+            idx
+        };
+        let (chunk, remainder) = rest.split_at(split);
+        let _ = channel_id.say(&ctx.http, chunk).await;
+        rest = remainder;
+    }
+}
+
+/// Invoke the OMP CLI with `query` as an argument, and return stdout.
+///
+/// OMP is expected to process the query, write a single response to
+/// stdout, and then exit.  A 1200-second timeout is enforced; the bot replies with
+/// an error message if OMP does not respond in time.
+async fn invoke_omp(omp_path: &str, model: Option<&str>, query: &str) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let mut cmd = Command::new(omp_path);
+    cmd.stdin(Stdio::null());
+    cmd.arg("-p");
+    if let Some(m) = model {
+        cmd.arg("--model");
+        cmd.arg(m);
+    }
+    cmd.arg(query);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(1200),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| "OMP timed out after 20 minutes (1200 seconds)".to_string())?
+    .map_err(|e| format!("OMP process I/O error: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("OMP exited with status {}", output.status)
+        } else {
+            stderr
+        })
     }
 }
 
@@ -73,17 +229,26 @@ impl DiscordService {
         let token = config.discord_token.clone();
 
         info!("Building Discord client...");
+
+        // Shared cell written by `ready`, read by `message`.
+        let bot_id = Arc::new(std::sync::OnceLock::new());
+
+        let handler = DiscordHandler {
+            config,
+            bot_id: bot_id.clone(),
+        };
+
         let mut client = ClientBuilder::new(
             &token,
             GatewayIntents::GUILD_MESSAGES
                 | GatewayIntents::DIRECT_MESSAGES
                 | GatewayIntents::MESSAGE_CONTENT,
         )
-        .event_handler(DiscordHandler)
+        .event_handler(handler)
         .await?;
 
         // Clone the HTTP handle before moving `client` into the spawn.
-        // All REST calls use this; the gateway is not required.
+        // All REST tool calls use this; the gateway is not required.
         let http = client.http.clone();
 
         info!("Spawning Discord gateway in background...");

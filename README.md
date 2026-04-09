@@ -1,22 +1,26 @@
 # Oh My Pi Discord Bridge
 
-An MCP (Model Context Protocol) server that exposes Discord capabilities as tools to Oh My Pi (OMP) via stdio transport, enabling agentic work through Discord.
+A robust, standalone Discord bot and MCP (Model Context Protocol) server that bridges [Oh My Pi (OMP)](https://github.com/yourusername/omp) with Discord. 
+
+This bridge allows you to interact with OMP directly through Discord channels, whether you're using powerful cloud models or local inferences via `llama.cpp`. 
 
 ## Features
 
-- 🤖 **MCP Server**: Exposes Discord as tools to OMP via stdio transport
-- 🔧 **Tool Support**: Full Discord toolset (send_message, read_channel, list_servers, mention_user, post_file)
-- 📡 **Stdio Transport**: Simple subprocess spawning from OMP
-- 🛠️ **Serenity Backend**: Built on serenity v0.12 for robust Discord integration
-- 🎯 **Type-Safe**: Full Rust type safety with rust-mcp-sdk
+- 🤖 **Native Chat Experience**: Chat naturally in Discord without needing command prefixes or mentions (unless you want to!).
+- 🧠 **Dynamic Model Switching**: Need more reasoning power? Switch models on the fly by adding `--model llama.cpp` or `--model gpt-4o` to your Discord messages.
+- 🐳 **Docker & Docker Compose**: Fully containerized for easy deployment and background execution.
+- 📡 **MCP Server Compatibility**: Acts as an MCP server over stdio for deep integration with OMP's agentic workflows.
+- 🛠️ **Full Tool Support**: Send messages, read channels, upload files, mention users, and ping for latency.
 
 ## Prerequisites
 
-- Rust 1.70+ and Cargo
 - A Discord bot token ([create one here](https://discord.com/developers/applications))
-- OMP configured to connect to MCP servers via stdio
+- **Important**: Ensure you enable the **Message Content Intent** under the Privileged Gateway Intents in the Discord Developer Portal for your bot.
+- Docker and Docker Compose (recommended for deployment) OR Rust 1.70+ and [Bun](https://bun.sh/) (for local execution).
 
-## Quick Start
+## Deployment (Recommended)
+
+The easiest way to run the bridge persistently in the background is via Docker Compose.
 
 ### 1. Clone the Repository
 
@@ -25,227 +29,83 @@ git clone https://github.com/ajaxdude/omp-discord-bridge.git
 cd omp-discord-bridge
 ```
 
-### 2. Install Dependencies and Build
+### 2. Configure Environment
 
-```bash
-cargo build --release
-```
-
-### 3. Configure Environment
+Copy the example environment file and add your Discord token:
 
 ```bash
 cp .env.example .env
-# Edit .env and add your Discord bot token
 nano .env
 ```
 
-## Configuration
-
-Create a `.env` file in the project directory with the following variables:
-
-```bash
-# Required: Your Discord bot token
+Ensure your `.env` file contains at minimum:
+```env
 DISCORD_TOKEN=your_discord_bot_token_here
 ```
 
-### Getting a Discord Bot Token
+### 3. Start with Docker Compose
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application
-3. Go to the "Bot" section
-4. Click "Add Bot"
-5. Copy the bot token
-6. Enable the following Privileged Gateway Intents:
-   - Message Content Intent
-   - Server Members Intent (if needed)
-7. Invite the bot to your server with the following scopes:
-   - `bot`
-   - `applications.commands`
-
-## Usage
-
-### Starting the MCP Server
+Build and launch the container in the background:
 
 ```bash
-# Development mode
-cargo run
-
-# Production mode
-cargo run --release
-
-# Or directly
-./target/release/omp_discord_bridge
+docker compose up -d --build
 ```
 
-The server will start and wait for MCP protocol messages on stdio. OMP should be configured to spawn this binary as an MCP server subprocess.
+The container automatically installs `oh-my-pi`, compiles the Rust bridge, and starts listening to Discord. It mounts your `~/.omp/agent` directory as a volume so that context and sessions are preserved across restarts.
 
-### Available Tools
-
-Once connected, OMP can use these Discord tools:
-
-- **ping**: Test the connection
-- **send_message**: Send a text message to a Discord channel
-- **read_channel**: Retrieve recent messages from a channel
-- **list_servers**: List all Discord servers the bot has access to
-- **mention_user**: Send a message mentioning a specific user
-- **post_file**: Upload and send a file to a Discord channel
-
-### Example OMP Configuration
-
-In OMP's configuration, add this MCP server:
-
-```json
-{
-  "mcp_servers": {
-    "discord": {
-      "command": "/path/to/omp_discord_bridge",
-      "args": [],
-      "transport": "stdio"
-    }
-  }
-}
+To view logs:
+```bash
+docker compose logs -f
 ```
+
+## Local Development & Usage
+
+If you prefer to run the bridge directly on your host machine without Docker:
+
+### 1. Install Dependencies
+
+Ensure you have Rust, Cargo, Bun, and Oh My Pi installed globally:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+bun install -g oh-my-pi
+cargo build --release
+```
+
+### 2. Run the Bridge
+
+Start the bridge in the background so it stays alive:
+
+```bash
+RUST_LOG=info nohup ./target/release/omp_discord_bridge </dev/null >/tmp/omp-bridge.log 2>&1 &
+```
+
+## Using the Bot in Discord
+
+Once the bot is online in your server, simply type your question or command into the channel where the bot has access. 
+
+**Example Queries:**
+- `Write a Python script that calculates the Fibonacci sequence.`
+- `!ping` (Returns the current one-way latency, e.g., `Pong! 0.123s`)
+- `--model claude-sonnet summarize the main themes of cybernetics.`
 
 ## Architecture
 
 ```
-OMP (MCP Client) ──stdio──► Discord Bridge (MCP Server) ──Discord API──► Discord
-                                  │
-                                  ▼
-                            Serenity Bot
-```
-
-### Components
-
-- **MCP Server**: Handles MCP protocol over stdio using rust-mcp-sdk
-- **Discord Service**: Core Discord operations wrapped in a service layer
-- **Tool Handlers**: Map MCP tool calls to Discord service methods
-- **Serenity Client**: Manages Discord connection and events
-
-## Development
-
-### Project Structure
-
-```
-src/
-├── main.rs              # Entry point, MCP server startup
-├── config.rs            # Configuration management
-├── error.rs             # Error types
-├── mcp/                 # MCP server implementation
-│   ├── mod.rs
-│   ├── server.rs        # MCP server setup and lifecycle
-│   └── tools.rs         # Tool definitions and handlers
-└── services/            # Business logic layer
-    ├── mod.rs
-    └── discord_service.rs  # Discord operations
-```
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-### Debugging
-
-Enable debug logging:
-
-```bash
-RUST_LOG=debug cargo run
-```
-
-For even more verbose logging:
-
-```bash
-RUST_LOG=trace cargo run
+User ──Discord Message──► Discord API ──WebSocket──► OMP Discord Bridge
+                                                            │
+                                                     Spawns `omp -p`
+                                                            │
+                                                            ▼
+                                                        Oh My Pi 
+                                                     (Local/Cloud LLM)
 ```
 
 ## Troubleshooting
 
-### Bot doesn't start
-
-1. Check that `DISCORD_TOKEN` is set correctly in `.env`
-2. Verify the bot has Message Content Intent enabled
-3. Check the logs for any errors
-
-### MCP connection fails
-
-1. Ensure OMP is configured to use stdio transport
-2. Verify the binary path in OMP configuration is correct
-3. Check that the Discord token is valid (bot connects successfully)
-
-### Tools don't respond
-
-1. Check that the bot has permission to read/write in the target channels
-2. Verify channel IDs are correct (use Discord developer mode to copy IDs)
-3. Check logs for error messages
-
-## Deployment
-
-### Using systemd
-
-Create a systemd service file at `/etc/systemd/system/omp-discord-bridge.service`:
-
-```ini
-[Unit]
-Description=Oh My Pi Discord Bridge MCP Server
-After=network.target
-
-[Service]
-Type=simple
-User=your_user
-WorkingDirectory=/path/to/omp-discord-bridge
-Environment="DISCORD_TOKEN=your_token"
-Environment="RUST_LOG=info"
-ExecStart=/path/to/omp-discord-bridge/target/release/omp_discord_bridge
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable omp-discord-bridge
-sudo systemctl start omp-discord-bridge
-```
-
-### Using Docker
-
-Create a `Dockerfile`:
-
-```dockerfile
-FROM rust:1.70 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates
-COPY --from=builder /app/target/release/omp_discord_bridge /usr/local/bin/
-CMD ["omp_discord_bridge"]
-```
-
-Build and run:
-
-```bash
-docker build -t omp-discord-bridge .
-docker run -d --name omp-discord-bridge -e DISCORD_TOKEN=your_token omp-discord-bridge
-```
+- **Bot doesn't respond to messages**: Ensure the **Message Content Intent** is enabled in the Discord Developer portal.
+- **OMP timeouts**: The bridge enforces a 20-minute timeout to allow local models (like `llama.cpp`) plenty of time to process complex queries. Ensure your local LLM server is reachable if using custom local models.
 
 ## License
 
 This project is provided as-is for educational and personal use.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-## Acknowledgments
-
-- Built with [Rust](https://www.rust-lang.org/)
-- Uses [Serenity](https://github.com/serenity-rs/serenity) for Discord integration
-- Uses [rust-mcp-sdk](https://github.com/modelcontextprotocol/rust-sdk) for MCP protocol
-- Integrates with [Oh My Pi](https://github.com/yourusername/omp) for AI-powered coding assistance

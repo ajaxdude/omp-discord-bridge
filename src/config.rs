@@ -33,7 +33,8 @@ impl Config {
             .unwrap_or_else(|_| "!".to_string());
         
         let omp_path = env::var("OMP_PATH")
-            .unwrap_or_else(|_| "omp".to_string());
+            .unwrap_or_else(|_| "omp".to_string())
+            .split('#').next().unwrap_or("omp").trim().to_string();
         
         Ok(Self {
             discord_token,
@@ -59,7 +60,8 @@ impl Config {
             .unwrap_or(config.discord_prefix);
         
         let omp_path = env::var("OMP_PATH")
-            .unwrap_or(config.omp_path);
+            .unwrap_or(config.omp_path)
+            .split('#').next().unwrap_or("omp").trim().to_string();
         
         Ok(Self {
             discord_token,

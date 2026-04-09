@@ -32,15 +32,14 @@ impl McpServer {
     pub async fn run(self) -> anyhow::Result<()> {
         info!("Starting OMP Discord Bridge MCP Server");
 
-        // Initialize Discord service
-        info!("Initializing Discord service...");
-        let discord_service = Arc::new(DiscordService::new(self.config.clone()).await?);
-
-        // Create tool handler with Discord service
-        let tool_handler = DiscordToolHandler {
-            discord_service,
-        };
-
+		// Initialize Discord service - this also starts the bot in background
+		info!("Creating Discord service and connecting to gateway...");
+		let discord_service = Arc::new(DiscordService::new(self.config.clone()).await?);
+		
+		// Create tool handler with Discord service
+		let tool_handler = DiscordToolHandler {
+		    discord_service,
+		};
         // Define server details and capabilities
         let server_info = InitializeResult {
             server_info: rust_mcp_sdk::schema::Implementation {

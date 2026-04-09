@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         .add_directive("serenity=warn".parse()?);
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 
