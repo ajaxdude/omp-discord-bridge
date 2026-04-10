@@ -290,8 +290,21 @@ impl EventHandler for DiscordHandler {
             info!("Starting new session for channel {}", msg.channel_id);
         }
 
-        // Broadcast a typing indicator while OMP processes — best-effort, ignore errors.
-        let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+        // Keep "F2 is typing..." alive for the full duration of the OMP call.
+        // Discord's typing indicator expires after ~10 s, so we re-send every 8 s
+        // on a background task and cancel it as soon as OMP returns.
+        let (typing_cancel_tx, mut typing_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let typing_http = ctx.http.clone();
+        let typing_channel = msg.channel_id;
+        tokio::spawn(async move {
+            loop {
+                let _ = typing_channel.broadcast_typing(&typing_http).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(8)) => {}
+                    _ = &mut typing_cancel_rx => break,
+                }
+            }
+        });
 
         // Helper: run OMP and, if it fails with a stale-session error, clear the
         // session and retry once without --resume before giving up.
@@ -333,6 +346,9 @@ impl EventHandler for DiscordHandler {
                 Err(e) => Err(e),
             }
         };
+
+        // Stop the typing indicator — best-effort, ignore if already dropped.
+        let _ = typing_cancel_tx.send(());
 
         match result {
             Ok((response, new_session, model_info)) => {
