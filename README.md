@@ -54,13 +54,18 @@ registers `/v1/responses`. A thin Python proxy bridges the gap:
 OMP  →  :8080 (llama-swap-proxy)  →  :8081 (llama-swap)  →  llama-server
 ```
 
-The proxy rewrites two paths and forwards everything else unchanged:
+The proxy rewrites three paths and forwards everything else unchanged:
 
 | Incoming | Forwarded to upstream |
 |---|---|
+| `GET /models` | `GET /v1/models` |
 | `POST /responses` | `POST /v1/responses` |
 | `POST /chat/completions` | `POST /v1/chat/completions` |
 | anything else | unchanged |
+
+The `/models` rewrite is critical: OMP's model discovery hits `GET /models` (no `/v1`
+prefix) on startup. Without this rewrite OMP gets a 404, marks the llama.cpp provider
+unavailable, and silently falls back to Claude for every `--model gemma/qwen` request.
 
 Both `llama-swap` and `llama-swap-proxy` run as user-level systemd services and start on boot.
 
