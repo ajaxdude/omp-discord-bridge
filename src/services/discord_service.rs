@@ -188,7 +188,10 @@ impl EventHandler for DiscordHandler {
         }
 
         let prefix = &self.config.discord_prefix;
-        let mut text = msg.content.trim();
+        // Discord (and some OS input methods) replace `--` with `—` (U+2014, em dash).
+        // Normalize up-front so command parsing always sees ASCII hyphens.
+        let content_normalized = msg.content.replace('\u{2014}', "--");
+        let mut text = content_normalized.trim();
 
         // !ping health check
         if text == format!("{}ping", prefix) {
