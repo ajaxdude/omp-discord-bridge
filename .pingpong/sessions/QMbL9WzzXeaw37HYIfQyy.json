@@ -1,0 +1,10 @@
+{
+  "id": "QMbL9WzzXeaw37HYIfQyy",
+  "taskId": "fix-20260414-001",
+  "status": "pending",
+  "summary": "Fixed two bugs in omp-discord-bridge. (1) resolve_model incorrectly fuzzy-matched hyphenated bare model IDs (e.g. \"gemma-4-26b-a4b\") against short aliases, resolving to the wrong model. Fix: treat any input containing '-' as a direct model ID, skipping alias lookup. (2) When OMP returns a message_end with stopReason=\"error\" and empty content (e.g. model not found in llama-swap), parse_omp_json_output returned empty string causing \"(OMP returned an empty response)\". Fix: surface the errorMessage from OMP's JSON, showing \"Model error: 400 ...\" instead. Also updated the stale 'gemma' alias in config.yaml from llama.cpp/gemma-4-31b-draft (no longer in llama-swap) to llama.cpp/gemma-4-26b-a4b.",
+  "details": "Files changed: src/services/discord_service.rs (resolve_model function: added '-' to passthrough check; parse_omp_json_output: added error detection after content loop; updated/added 3 unit tests), ~/.config/omp-discord-bridge/config.yaml (gemma alias updated). The broken substring_match_prefers_longest_needle test was updated to not use a hyphenated input since that's now the bug by design. 8/8 tests pass. Service restarted and running.",
+  "iterationCount": 0,
+  "createdAt": "2026-04-14T17:24:51.525Z",
+  "updatedAt": "2026-04-14T17:24:51.525Z"
+}

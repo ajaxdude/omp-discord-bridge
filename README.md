@@ -5,6 +5,7 @@ A standalone Discord bot and MCP (Model Context Protocol) server that bridges [O
 ## Features
 
 - **Persistent sessions per channel** — each Discord channel maintains its own OMP session so the agent remembers context across messages. Sessions survive service restarts.
+- **Sandboxed workspace navigation** — each channel tracks its own working directory. Use `!omp ls`, `!omp cd`, and `!omp ..` to navigate the project tree. Navigation is strictly limited to the configured `OMP_WORK_DIR` sandbox.
 - **Local model routing** — `--model gemma` or `--model qwen` routes directly to your local llama-swap instance. Short aliases are resolved from a config file you edit without recompiling.
 - **Dynamic model switching** — switch models on the fly with `--model` in any message. Fully-qualified OMP model IDs (e.g. `llama.cpp/gemma-4-31b-draft`) always pass through unchanged.
 - **MCP server** — also acts as an MCP server over stdio so OMP agents can read channels, send messages, and upload files as tools.
@@ -20,13 +21,12 @@ A standalone Discord bot and MCP (Model Context Protocol) server that bridges [O
 
 ## Architecture
 
-```
 Discord message
       │
       ▼
 Discord Gateway (serenity)
       │
-      │  parse --model <alias>
+      │  parse --model <alias> | cd <dir> | ls | ..
       │  resolve_model() ──► ~/.config/omp-discord-bridge/config.yaml
       ▼
 invoke_omp()
@@ -42,8 +42,7 @@ parse_omp_json_output()
 send_chunked() → Discord reply (≤1900 bytes per message)
       │
       ▼
-session_id saved to ~/.local/share/omp-discord-bridge/sessions.json
-```
+session_id & work_dir saved to ~/.local/share/omp-discord-bridge/
 
 ### Local model path (llama-swap)
 
@@ -161,6 +160,9 @@ All commands require the `!omp` prefix or an @mention of the bot. The prefix can
 | `!omp <query>` | Send a query to the OMP agent using the default model. |
 | `@ompbot <query>` | Same as `!omp <query>`, triggered by mentioning the bot. |
 | `!omp --model <alias> <query>` | Use a specific model for this query (see alias table below). |
+| `!omp ls` | List files in the current channel's working directory. |
+| `!omp cd <dir>` | Change the working directory (relative or `/` for root). Sandboxed to `OMP_WORK_DIR`. |
+| `!omp ..` | Move up one directory level (stops at `OMP_WORK_DIR`). |
 | `!omp reset` | Clear the active OMP session for this channel. The next message starts a fresh conversation. |
 
 ### Model alias examples
@@ -211,7 +213,7 @@ All options are set in `.env` in the project root.
 | `DISCORD_TOKEN` | *(required)* | Your Discord bot token |
 | `DISCORD_PREFIX` | `!` | Command prefix for bot commands |
 | `OMP_PATH` | `omp` | Path to the `omp` binary (resolved via `PATH` if not absolute) |
-| `OMP_WORK_DIR` | `$HOME` | Working directory for OMP subprocesses. Set to your project root so the agent's file tools resolve relative paths correctly. |
+| `OMP_WORK_DIR` | `$HOME` | Sandbox root and default working directory for OMP subprocesses. The agent cannot navigate above this path. |
 | `BRIDGE_CONFIG` | `~/.config/omp-discord-bridge/config.yaml` | Path to the bridge YAML config file (model aliases). |
 
 ## Adding a new local model

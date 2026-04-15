@@ -1,0 +1,12 @@
+{
+  "id": "F2I5s3g1X9wnau0j-PmUv",
+  "taskId": "fix-20260410-001",
+  "status": "escalated",
+  "summary": "Fixed two bugs causing --model routing to fail in Discord. (1) The llama-swap-proxy was missing a GET /models → GET /v1/models rewrite; OMP's llama.cpp provider discovery was 404ing on startup, marking the provider unavailable and silently falling back to Claude for every --model request. Fixed by adding the /models rewrite to the proxy rewrite table. (2) Discord autocorrects -- to — (U+2014 em dash); the --model prefix check was a plain ASCII string comparison that never matched. Fixed by replacing em dashes with -- immediately after reading msg.content, before any command parsing.",
+  "details": "Files changed:\n- ~/.local/bin/llama-swap-proxy.py: added /models → /v1/models to PATH_REWRITES dict\n- ~/.config/systemd/user/llama-swap-proxy.service: Requires= → Wants= to eliminate boot ordering cycle that killed the proxy on every reboot\n- src/services/discord_service.rs: msg.content.replace('\\u{2014}', \"--\") before command parsing\n- README.md: added /models row to proxy rewrite table with explanation of why it matters\n\nSecurity: no new attack surface. The em-dash replacement only normalizes the message string before existing parsing logic. The proxy rewrite adds one additional path but only locally (127.0.0.1). No new dependencies.",
+  "iterationCount": 0,
+  "createdAt": "2026-04-10T06:12:51.887Z",
+  "updatedAt": "2026-04-10T06:14:34.164Z",
+  "reviewerType": "human",
+  "humanFeedback": "LGTM"
+}

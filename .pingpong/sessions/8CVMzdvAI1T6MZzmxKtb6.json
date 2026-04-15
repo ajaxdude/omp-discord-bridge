@@ -1,10 +1,12 @@
 {
   "id": "8CVMzdvAI1T6MZzmxKtb6",
   "taskId": "fix-20260409-001",
-  "status": "pending",
+  "status": "escalated",
   "summary": "Added inbound Discord message handler to omp-discord-bridge. The DiscordHandler was a no-op struct with only a ready() event handler — no message handler existed, so !ping, !omp, and @mention commands were silently dropped. Added: (1) bot_id: Arc<OnceLock<UserId>> captured in ready(), used to detect @mentions; (2) message() handler that routes !ping → \"Pong!\", !omp <query> and @bot <query> → invoke_omp() subprocess call; (3) invoke_omp() spawns OMP CLI via stdin with 60s timeout; (4) send_chunked() for responses exceeding Discord's 2000-char limit. Also fixed a pre-existing Cargo.toml corruption (null-byte line 25). The llama.cpp hypothesis was a red herring — no such connection exists in the codebase.",
   "details": "Key design decisions: OnceLock for bot_id (written once from ready, read-only after); strip_prefix() instead of starts_with+slice for safe string extraction; send_chunked walks back from 1900 bytes to the nearest valid UTF-8 char boundary; invoke_omp passes query via stdin (most general interface) with EOF on stdin drop; all Discord API calls are best-effort (let _ =) to prevent a failed send from crashing the event handler. Config reuse: DiscordHandler takes Config directly (has Clone) rather than copying individual fields.",
   "iterationCount": 0,
   "createdAt": "2026-04-09T07:25:55.364Z",
-  "updatedAt": "2026-04-09T07:25:55.364Z"
+  "updatedAt": "2026-04-10T06:14:07.780Z",
+  "reviewerType": "human",
+  "humanFeedback": "LGTM"
 }

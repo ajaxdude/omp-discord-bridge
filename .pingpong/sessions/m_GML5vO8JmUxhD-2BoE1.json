@@ -1,0 +1,10 @@
+{
+  "id": "m_GML5vO8JmUxhD-2BoE1",
+  "taskId": "fix-20260412-001",
+  "status": "pending",
+  "summary": "Removed `After=default.target` from `/home/papa/.config/systemd/user/llama-swap.service`. This line created a circular ordering dependency: default.target wants both llama-swap and llama-swap-proxy (via default.target.wants/ symlinks); llama-swap-proxy has After=llama-swap.service; llama-swap had After=default.target — completing the cycle. Systemd was randomly breaking the cycle at each boot by dropping one job, causing inconsistent startup failures. The fix removes the bogus After= (a service is never ordered after the target it helps constitute). Both services now start cleanly with no cycle warnings. Linger=yes is already set on the user so the user session starts at boot.",
+  "details": "File changed: /home/papa/.config/systemd/user/llama-swap.service — removed `After=default.target` line (5 lines → 4 lines in [Unit] section). No new dependencies introduced. Security: no implications. The `WantedBy=default.target` install directive is correct and untouched — it is what pulls the service into the boot sequence. Only the spurious `After=` ordering constraint was removed.",
+  "iterationCount": 0,
+  "createdAt": "2026-04-12T00:26:54.714Z",
+  "updatedAt": "2026-04-12T00:26:54.714Z"
+}
